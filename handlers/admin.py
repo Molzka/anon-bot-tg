@@ -7,8 +7,6 @@ from core.config import ADMIN_ID
 from crud import (
     db_count_questions,
     db_count_users,
-    db_debug_enabled,
-    db_toggle_debug,
 )
 from states import BroadcastState
 
@@ -19,10 +17,7 @@ router = Router()
 async def cmd_debug(message: types.Message):
     if str(message.from_user.id) != str(ADMIN_ID):
         return
-    print(ADMIN_ID)
-    state = db_toggle_debug()
-    print(state)
-    await message.answer(f"Debug-режим: {'включён' if state else 'выключен'}")
+    await message.answer("Debug-пересылка удалена: данные авторов и переписка администратору не отправляются.")
 
 
 @router.message(Command("broadcast"))
@@ -42,7 +37,6 @@ async def cmd_stats(message: types.Message):
     await message.answer(
         f"<b>Статистика</b>\n\n"
         f"Пользователей: {db_count_users()}\n"
-        f"Вопросов: {db_count_questions()}\n"
-        f"Debug: {'✅' if db_debug_enabled() else '❌'}",
+        f"Попыток отправки вопросов: {db_count_questions()}\n",
         parse_mode=ParseMode.HTML,
     )

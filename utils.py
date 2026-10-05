@@ -1,13 +1,27 @@
+import asyncio
 import logging
-from html import escape
+from enum import Enum
 
 from aiogram import Bot, types
-from aiogram.enums import ParseMode
-
-from core.config import ADMIN_ID
-from crud import db_debug_enabled
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 
 logger = logging.getLogger(__name__)
+MAX_SEND_ATTEMPTS = 3
+MAX_RETRY_AFTER = 30
+
+
+class DeliveryStatus(Enum):
+    SENT = "sent"
+    BLOCKED = "blocked"
+    TEMPORARY_ERROR = "temporary_error"
+    FAILED = "failed"
+    UNSUPPORTED = "unsupported"
 
 
 def extract_media(msg: types.Message):
@@ -15,21 +29,52 @@ def extract_media(msg: types.Message):
         return "text", msg.text, None, None
     if msg.photo:
         return "photo", None, msg.photo[-1].file_id, msg.caption
-    if msg.video:
-        return "video", None, msg.video.file_id, msg.caption
-    if msg.animation:
-        return "animation", None, msg.animation.file_id, msg.caption
-    if msg.document:
-        return "document", None, msg.document.file_id, msg.caption
-    if msg.voice:
-        return "voice", None, msg.voice.file_id, msg.caption
-    if msg.audio:
-        return "audio", None, msg.audio.file_id, msg.caption
-    if msg.video_note:
-        return "video_note", None, msg.video_note.file_id, None
-    if msg.sticker:
-        return "sticker", None, msg.sticker.file_id, None
+    for kind in ("animation", "video", "document", "voice", "audio", "video_note", "sticker"):
+        media = getattr(msg, kind)
+        if media:
+            caption = msg.caption if kind not in ("video_note", "sticker") else None
+            return kind, None, media.file_id, caption
     return None, None, None, None
+
+
+def split_text(text: str, limit: int = 4096) -> list[str]:
+    chunks = []
+    start = units = 0
+    for index, character in enumerate(text):
+        size = 2 if ord(character) > 0xFFFF else 1
+        if units + size > limit:
+            chunks.append(text[start:index])
+            start, units = index, 0
+        units += size
+    if start < len(text):
+        chunks.append(text[start:])
+    return chunks
+
+
+async def send_with_retry(send, **kwargs):
+    for attempt in range(MAX_SEND_ATTEMPTS):
+        try:
+            return await send(**kwargs)
+        except TelegramRetryAfter as exc:
+            if attempt == MAX_SEND_ATTEMPTS - 1 or exc.retry_after > MAX_RETRY_AFTER:
+                raise
+            await asyncio.sleep(exc.retry_after)
+        except (TelegramNetworkError, TelegramServerError):
+            if attempt == MAX_SEND_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(2 ** attempt)
+
+
+async def send_text(bot: Bot, chat_id: int, text: str, reply_markup=None):
+    chunks = split_text(text)
+    for index, chunk in enumerate(chunks):
+        await send_with_retry(
+            bot.send_message,
+            chat_id=chat_id,
+            text=chunk,
+            parse_mode=None,
+            reply_markup=reply_markup if index == len(chunks) - 1 else None,
+        )
 
 
 async def deliver(
@@ -38,153 +83,44 @@ async def deliver(
     msg: types.Message,
     header: str,
     reply_markup=None,
-) -> bool:
+) -> DeliveryStatus:
+    kind, content, file_id, caption = extract_media(msg)
+    if kind is None:
+        return DeliveryStatus.UNSUPPORTED
     try:
-        if msg.text:
-            await bot.send_message(
-                chat_id,
-                f"{header}<i>{escape(msg.text)}</i>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
+        if kind == "text":
+            await send_text(bot, chat_id, header + content, reply_markup)
+        elif kind in ("video_note", "sticker"):
+            if header:
+                await send_text(bot, chat_id, header)
+            await send_with_retry(
+                getattr(bot, f"send_{kind}"), chat_id=chat_id,
+                **{kind: file_id}, reply_markup=reply_markup,
             )
-
-        elif msg.photo:
-            cap = header + (f"<i>{escape(msg.caption)}</i>" if msg.caption else "")
-            await bot.send_photo(
-                chat_id,
-                photo=msg.photo[-1].file_id,
-                caption=cap,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
-            )
-
-        elif msg.video:
-            cap = header + (f"<i>{escape(msg.caption)}</i>" if msg.caption else "")
-            await bot.send_video(
-                chat_id,
-                video=msg.video.file_id,
-                caption=cap,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
-            )
-
-        elif msg.animation:
-            cap = header + (f"<i>{escape(msg.caption)}</i>" if msg.caption else "")
-            await bot.send_animation(
-                chat_id,
-                animation=msg.animation.file_id,
-                caption=cap,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
-            )
-
-        elif msg.document:
-            cap = header + (f"<i>{escape(msg.caption)}</i>" if msg.caption else "")
-            await bot.send_document(
-                chat_id,
-                document=msg.document.file_id,
-                caption=cap,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
-            )
-
-        elif msg.voice:
-            cap = header + (f"<i>{escape(msg.caption)}</i>" if msg.caption else "")
-            await bot.send_voice(
-                chat_id,
-                voice=msg.voice.file_id,
-                caption=cap,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
-            )
-
-        elif msg.audio:
-            cap = header + (f"<i>{escape(msg.caption)}</i>" if msg.caption else "")
-            await bot.send_audio(
-                chat_id,
-                audio=msg.audio.file_id,
-                caption=cap,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
-            )
-
-        elif msg.video_note:
-            await bot.send_message(chat_id, header, parse_mode=ParseMode.HTML)
-            await bot.send_video_note(
-                chat_id,
-                video_note=msg.video_note.file_id,
-                reply_markup=reply_markup,
-            )
-
-        elif msg.sticker:
-            await bot.send_message(chat_id, header, parse_mode=ParseMode.HTML)
-            await bot.send_sticker(
-                chat_id,
-                sticker=msg.sticker.file_id,
-                reply_markup=reply_markup,
-            )
-
         else:
-            return False
+            combined = header + (caption or "")
+            overflow = len(combined.encode("utf-16-le")) // 2 > 1024
+            await send_with_retry(
+                getattr(bot, f"send_{kind}"), chat_id=chat_id,
+                **{kind: file_id}, caption=header if overflow else combined,
+                parse_mode=None, reply_markup=None if overflow else reply_markup,
+            )
+            if overflow:
+                await send_text(bot, chat_id, caption or "", reply_markup)
+        return DeliveryStatus.SENT
+    except TelegramForbiddenError as exc:
+        status = DeliveryStatus.BLOCKED
+        error_type = type(exc).__name__
+    except (TelegramRetryAfter, TelegramNetworkError, TelegramServerError) as exc:
+        status = DeliveryStatus.TEMPORARY_ERROR
+        error_type = type(exc).__name__
+    except TelegramAPIError as exc:
+        status = DeliveryStatus.FAILED
+        error_type = type(exc).__name__
 
-        return True
-
-    except Exception as e:
-        logger.error("deliver → %s: %s", chat_id, e)
-        return False
-
-
-async def notify_debug(
-    bot: Bot,
-    from_user: types.User,
-    to_id: int,
-    action: str,
-    msg: types.Message,
-):
-    if not db_debug_enabled():
-        return
-    name = (
-        f"@{from_user.username}" if from_user.username else escape(from_user.full_name)
-    )
-    text = (
-        f"<b>{action}</b>\n"
-        f"От: {name} (<code>{from_user.id}</code>)\n"
-        f"Кому: <code>{to_id}</code>\n"
-    )
-
-    m_type, content, _, caption = extract_media(msg)
-    text += f"Тип: {m_type}\n"
-    if content:
-        text += f"Текст: {escape(content[:300])}\n"
-    if caption:
-        text += f"Подпись: {escape(caption[:300])}\n"
-
-    try:
-        await bot.send_message(ADMIN_ID, text, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        logger.error("notify_debug error: %s", e)
+    logger.warning("Delivery failed (%s)", error_type)
+    return status
 
 
-async def forward_broadcast(bot: Bot, chat_id: int, msg: types.Message):
-    if msg.text:
-        await bot.send_message(chat_id, msg.text)
-    elif msg.photo:
-        await bot.send_photo(chat_id, photo=msg.photo[-1].file_id, caption=msg.caption)
-    elif msg.video:
-        await bot.send_video(chat_id, video=msg.video.file_id, caption=msg.caption)
-    elif msg.animation:
-        await bot.send_animation(
-            chat_id, animation=msg.animation.file_id, caption=msg.caption
-        )
-    elif msg.document:
-        await bot.send_document(
-            chat_id, document=msg.document.file_id, caption=msg.caption
-        )
-    elif msg.voice:
-        await bot.send_voice(chat_id, voice=msg.voice.file_id, caption=msg.caption)
-    elif msg.audio:
-        await bot.send_audio(chat_id, audio=msg.audio.file_id, caption=msg.caption)
-    elif msg.video_note:
-        await bot.send_video_note(chat_id, video_note=msg.video_note.file_id)
-    elif msg.sticker:
-        await bot.send_sticker(chat_id, sticker=msg.sticker.file_id)
+async def forward_broadcast(bot: Bot, chat_id: int, msg: types.Message) -> DeliveryStatus:
+    return await deliver(bot, chat_id, msg, header="")

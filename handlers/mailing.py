@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from core.config import ADMIN_ID
 from crud import db_all_users
 from states import BroadcastState
-from utils import forward_broadcast
+from utils import DeliveryStatus, forward_broadcast
 
 router = Router()
 
@@ -28,8 +28,11 @@ async def on_broadcast(message: types.Message, state: FSMContext, bot: Bot):
 
     for i, u in enumerate(users, 1):
         try:
-            await forward_broadcast(bot, u.user_id, message)
-            ok_count += 1
+            result = await forward_broadcast(bot, u.user_id, message)
+            if result is DeliveryStatus.SENT:
+                ok_count += 1
+            else:
+                fail_count += 1
         except Exception:
             fail_count += 1
 

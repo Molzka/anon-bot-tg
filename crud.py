@@ -1,8 +1,8 @@
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
+from math import ceil
 
 from core.database import Session
-from models.bot_settings import BotSettings
 from models.question import Question
 from models.user import User
 
@@ -78,6 +78,20 @@ def db_get_question(qid: int):
         session.close()
 
 
+def db_question_cooldown_remaining(user_id: int, cooldown: int) -> int:
+    with Session() as session:
+        latest = (
+            session.query(Question.created_at)
+            .filter_by(from_user_id=user_id)
+            .order_by(Question.created_at.desc())
+            .first()
+        )
+        if not latest:
+            return 0
+        elapsed = (datetime.now(timezone.utc).replace(tzinfo=None) - latest.created_at).total_seconds()
+        return max(0, ceil(cooldown - elapsed))
+
+
 def db_all_users() -> list[User]:
     session = Session()
     try:
@@ -85,34 +99,6 @@ def db_all_users() -> list[User]:
         for u in users:
             session.expunge(u)
         return users
-    finally:
-        session.close()
-
-
-def db_debug_enabled() -> bool:
-    session = Session()
-    try:
-        s = session.query(BotSettings).first()
-        if not s:
-            s = BotSettings(debug_mode=False)
-            session.add(s)
-            session.commit()
-        return s.debug_mode
-    finally:
-        session.close()
-
-
-def db_toggle_debug() -> bool:
-    session = Session()
-    try:
-        s = session.query(BotSettings).first()
-        if not s:
-            s = BotSettings(debug_mode=True)
-            session.add(s)
-        else:
-            s.debug_mode = not s.debug_mode
-        session.commit()
-        return s.debug_mode
     finally:
         session.close()
 

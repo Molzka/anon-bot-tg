@@ -20,7 +20,6 @@ async def cmd_help(message: types.Message):
     if str(message.from_user.id) == str(ADMIN_ID):
         text += (
             "\n🔧 <b>Админ</b>\n"
-            "/debug — вкл / выкл debug-режим\n"
             "/broadcast — рассылка\n"
             "/stats — статистика\n"
         )
